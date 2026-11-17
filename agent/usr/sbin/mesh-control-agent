@@ -1,0 +1,537 @@
+#!/bin/sh
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+umask 077
+work=$(mktemp -d /tmp/mesh-agent.XXXXXX) || exit 1
+trap 'rm -rf "$work"' EXIT
+trap 'exit 0' INT TERM
+config_load mesh-control-agent || exit 1
+config_get id main id
+config_get url main url
+config_get pin main pin
+config_get token main token
+config_get sections main ap
+case "$url" in https://*) ;; *) exit 1;; esac
+case "$pin" in sha256//*) ;; *) exit 1;; esac
+case "$id" in ''|*[!A-Za-z0-9_-]*) exit 1;; esac
+case "$token" in *[!a-f0-9]*) exit 1;; esac
+[ "${#token}" = 64 ] && [ -n "$sections" ] || exit 1
+printf 'Authorization: Bearer %s\n' "$token" >"$work/headers"
+applied= failed= error=
+channel_ack= channel_result= survey_request= survey_ack=
+
+set_wireless() {
+	uci -q -P "$work/uci" "$@"
+}
+
+radio_channels() {
+	ubus call iwinfo freqlist "{\"device\":\"$1\"}" 2>/dev/null |
+		jsonfilter -e '@.results[@.restricted=false].channel' |
+		awk '/^[0-9]+$/ && $0 >= 1 && $0 <= 233 && !seen[$0]++ {
+			printf "%s%s", sep, $0; sep = ","
+		}'
+}
+
+radio_value_allowed() {
+	local entry
+	for entry in $1; do
+		[ "${entry%%:*}" = "$2" ] || continue
+		case ",${entry#*:}," in *,"$3",*) return 0;; esac
+	done
+	return 1
+}
+
+valid_channel_changes() {
+	local change device channel seen=
+	for change in $2; do
+		device=${change%%:*}
+		channel=${change#*:}
+		case "$device:$channel" in :*|*:|*[!A-Za-z0-9_:]*) return 1;; esac
+		case "$channel" in *[!0-9]*) return 1;; esac
+		case " $seen " in *" $device "*) return 1;; esac
+		radio_value_allowed "$1" "$device" "$channel" || return 1
+		seen="$seen $device"
+	done
+	[ -n "$seen" ]
+}
+# device:channel:width:power entries, comma separated. '-' preserves a value.
+valid_radio_changes() {
+    local change device channel width power rest seen= value
+    case "$4" in ''|,*|*,|*,,*|*[!A-Za-z0-9_:,-]*) return 1;; esac
+    for change in $(printf '%s' "$4" | tr ',' ' '); do
+        device=${change%%:*}; rest=${change#*:}
+        channel=${rest%%:*}; rest=${rest#*:}
+        width=${rest%%:*}; power=${rest#*:}
+        case "$device" in ''|*[!A-Za-z0-9_]*) return 1;; esac
+        case " $seen " in *" $device "*) return 1;; esac
+        [ "$change" = "$device:$channel:$width:$power" ] || return 1
+        [ "$channel:$width:$power" != '-:-:-' ] || return 1
+        for value in "$channel" "$width" "$power"; do
+            case "$value" in -) ;; ''|*[!0-9]*) return 1;; esac
+        done
+        { [ "$channel" = - ] || radio_value_allowed "$1" "$device" "$channel"; } &&
+        { [ "$width" = - ] || radio_value_allowed "$2" "$device" "$width"; } &&
+        { [ "$power" = - ] || radio_value_allowed "$3" "$device" "$power"; } || return 1
+        seen="$seen $device"
+    done
+    [ -n "$seen" ]
+}
+
+apply_profile() {
+    local rest value mode
+	local staged device driver encryption ftmdid first_byte second_byte change
+	[ -f /etc/config/wireless ] || return 1
+	[ -z "$(uci -q changes wireless)" ] || return 2
+	for section in $sections; do
+		case "$section" in *[!a-zA-Z0-9_]*) return 1;; esac
+		[ "$(uci -q get "wireless.$section")" = wifi-iface ] &&
+		[ "$(uci -q get "wireless.$section.mode")" = ap ] &&
+		[ "$(uci -q get "wireless.$section.disabled")" != 1 ] || return 1
+	done
+	rm -rf "$work/uci"
+	mkdir "$work/uci" || return 1
+	cp -p /etc/config/wireless "$work/wireless" || return 1
+	for section in $sections; do
+		base="wireless.$section"
+		device=$(uci -q get "$base.device")
+		driver=$(uci -q get "wireless.$device.type")
+		encryption=psk2
+		case "$driver" in
+			qcawifi|qcawificfg80211)
+				# Qualcomm also advertises GCMP when the cipher is left implicit.
+				[ "$roaming" != 1 ] || encryption=psk2+ccmp
+				;;
+		esac
+		set_wireless set "$base.ssid=$ssid" &&
+		set_wireless set "$base.encryption=$encryption" &&
+		set_wireless set "$base.key=$key" &&
+		set_wireless set "$base.ieee80211r=$roaming" &&
+		set_wireless set "$base.ieee80211k=$roaming" &&
+		set_wireless set "$base.rrm_neighbor_report=$roaming" &&
+		set_wireless set "$base.rrm_beacon_report=$roaming" &&
+		set_wireless set "$base.bss_transition=$roaming" &&
+		set_wireless set "$base.mobility_domain=$domain" &&
+		set_wireless set "$base.ft_over_ds=0" &&
+		set_wireless set "$base.ft_psk_generate_local=1" || return 1
+		case "$driver" in
+			mt_dbdc|rtwifi)
+				set_wireless set "$base.ieee80211v=$roaming" || return 1
+				if [ "$roaming" = 1 ]; then
+					case "$domain" in
+						[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
+						*) return 1 ;;
+					esac
+					# The driver sends these two characters as the Mobility Domain bytes.
+					first_byte=${domain%??}
+					second_byte=${domain#??}
+					ftmdid=$(printf '%b%b' "\\$(printf '%03o' "0x$first_byte")" \
+						"\\$(printf '%03o' "0x$second_byte")")
+					case "$ftmdid" in
+						[A-Za-z0-9][A-Za-z0-9]) ;;
+						*) return 3 ;;
+					esac
+					set_wireless set "$base.ftmdid=$ftmdid" || return 1
+				fi
+				;;
+		esac
+	done
+	if [ -n "$channel_target" ]; then
+		if [ "$radio_option" = radios ]; then
+            for change in $(printf '%s' "$requested_channel" | tr ',' ' '); do
+                device=${change%%:*}; rest=${change#*:}
+                value=${rest%%:*}; rest=${rest#*:}
+                [ "$value" = - ] || set_wireless set "wireless.$device.channel=$value" || return 1
+                value=${rest%%:*}
+                if [ "$value" != - ]; then
+                    mode=$(uci -q get "wireless.$device.htmode")
+                    set_wireless set "wireless.$device.htmode=${mode%%[0-9]*}$value" || return 1
+                fi
+                value=${rest#*:}
+                [ "$value" = - ] || set_wireless set "wireless.$device.txpower=$value" || return 1
+            done
+        elif [ "$radio_option" = channels ]; then
+			for change in $channel_changes; do
+				set_wireless set "wireless.${change%%:*}.channel=${change#*:}" || return 1
+			done
+		elif [ "$radio_option" = bundle ]; then
+			[ "$next_channel" = - ] || set_wireless set "wireless.$channel_target.channel=$next_channel" || return 1
+			[ "$next_width" = - ] || set_wireless set "wireless.$channel_target.htmode=$next_width" || return 1
+			[ "$next_power" = - ] || set_wireless set "wireless.$channel_target.txpower=$next_power" || return 1
+		else
+			set_wireless set "wireless.$channel_target.$radio_option=$requested_channel" || return 1
+		fi
+	fi
+	[ -n "$(set_wireless changes wireless)" ] || return 0
+	cmp -s "$work/wireless" /etc/config/wireless && [ -z "$(uci -q changes wireless)" ] || return 2
+	# Older UCI releases can read a private delta directory but ignore it
+	# during commit. Export the merged config and install it atomically.
+	set_wireless -N export wireless >"$work/export" || return 1
+	staged=$(mktemp /etc/config/.mesh-wireless.XXXXXX) || return 1
+	if ! sed '1{/^package wireless$/d;}' "$work/export" >"$staged" ||
+	   ! mv -f "$staged" /etc/config/wireless; then
+		rm -f "$staged"
+		return 1
+	fi
+	if wifi reload >/dev/null 2>&1; then
+		return 0
+	fi
+	cp -p "$work/wireless" /etc/config/wireless && wifi reload >/dev/null 2>&1
+	return 1
+}
+
+refresh_neighbors() {
+	local iface="$1" device="$2" ssid="$3"
+	local configured_ssid own socket listing mac report missing=0
+	[ "$(uci -q get "wireless.$4.ieee80211k")" = 1 ] || return
+	{
+		IFS= read -r configured_ssid && [ "$configured_ssid" = "$ssid" ] || return
+		own=$(cat "/sys/class/net/$iface/address" 2>/dev/null) || return
+		if listing=$(ubus call "hostapd.$iface" rrm_nr_list 2>/dev/null); then
+			json_set_namespace neighbor_
+			json_init
+			json_add_array list
+			while read -r mac report; do
+				[ -n "$report" ] && [ "$mac" != "$own" ] || continue
+				case "$listing" in *\""$mac"\"*) ;; *) missing=1 ;; esac
+				json_add_array ''
+				json_add_string '' "$mac"
+				json_add_string '' "$ssid"
+				json_add_string '' "$report"
+				json_close_array
+			done
+			json_close_array
+			[ "$missing" = 0 ] ||
+				ubus call "hostapd.$iface" rrm_nr_set "$(json_dump)" >/dev/null
+			json_cleanup
+			json_set_namespace ''
+		else
+			socket="/var/run/hostapd-$device"
+			[ -S "$socket/$iface" ] || return
+			listing=$(hostapd_cli -p "$socket" -i "$iface" show_neighbor 2>/dev/null) || return
+			ssid=$(printf '%s' "$ssid" | hexdump -ve '1/1 "%02x"')
+			while read -r mac report; do
+				[ -n "$report" ] && [ "$mac" != "$own" ] || continue
+				case "$listing" in *"$mac "*) continue ;; esac
+				hostapd_cli -p "$socket" -i "$iface" set_neighbor "$mac" \
+					"ssid=$ssid" "nr=$report" >/dev/null
+			done
+		fi
+	} </etc/mesh-control/rrm-neighbors
+}
+
+# Bounded scan without relying on the optional BusyBox timeout applet.
+rf_scan() {
+    local scan_pid guard_pid rc file="/tmp/mesh-scan.$$"
+    iwinfo "$1" scan >"$file" 2>/dev/null &
+    scan_pid=$!
+    (sleep 15; kill -9 "$scan_pid" 2>/dev/null) >/dev/null 2>&1 &
+    guard_pid=$!
+    wait "$scan_pid"; rc=$?
+    kill "$guard_pid" 2>/dev/null
+    wait "$guard_pid" 2>/dev/null
+    [ "$rc" != 0 ] || cat "$file"
+    rm -f "$file"
+    return "$rc"
+}
+
+# Opt-in RF survey, cached for five minutes; never changes radio settings.
+rf_survey() {
+    local cache="/tmp/mesh-rf-$1" now last=0 data
+    now=$(date +%s)
+    [ ! -f "$cache" ] || read -r last data <"$cache"
+    if { [ "$(uci -q get mesh-control-agent.main.survey)" = 1 ] && [ "$((now - last))" -ge 300 ]; } || { [ -n "$survey_request" ] && [ "$survey_request" != "$survey_ack" ]; }; then
+        if data=$(rf_scan "$2"); then
+            data=$(printf '%s\n' "$data" | awk '
+                /Cell [0-9]+ - Address:/ { ch="" }
+                /Channel: / { for(i=1;i<NF;i++) if($i=="Channel:") ch=$(i+1) }
+                /Signal: / && ch ~ /^[0-9]+$/ {
+                    for(i=1;i<NF;i++) if($i=="Signal:") {
+                        v=$(i+1); if(v < 0 && v >= -110) {
+                            count[ch]++; if(!(ch in peak) || v>peak[ch]) peak[ch]=v
+                        }
+                    }
+                }
+                END { n=0; for(ch in count) if(n++<32) printf "%s%s~%s~%s",(n>1?",":""),ch,peak[ch],count[ch] }
+            ')
+            printf '%s %s\n' "$now" "$data" >"$cache.new" && mv "$cache.new" "$cache"
+        fi
+    fi
+    [ ! -f "$cache" ] || { read -r last data <"$cache"; printf '%s:%s:%s' "$1" "$last" "$data"; }
+}
+
+report_radios() {
+	local section device iface channel country channels countries label associations clients client_count known=1 survey= sample= sampled= backhaul_radio= backhaul=
+	local wireless_status bridge_link bridge_name fdb radios= allowed widths= width_options= info mode configured family modes width power powers= power_options= driver power_choices configured_power details= frequency band current_channel
+	if [ "$(uci -q get mesh-backhaul.main.enabled)" = 1 ]; then
+        backhaul_radio=$(uci -q get mesh-backhaul.main.radio)
+        backhaul=$(cat /var/run/mesh-backhaul/mode 2>/dev/null)
+    fi
+    json_add_string backhaul "$backhaul"
+    json_add_string backhaul_radio "$backhaul_radio"
+	wireless_status=$(ubus call network.wireless status 2>/dev/null)
+	fdb=$(bridge fdb show 2>/dev/null)
+	set -- $sections
+	for section in "$@"; do
+		device=$(uci -q get "wireless.$section.device")
+		[ -n "$device" ] || continue
+		iface=$(uci -q get "wireless.$section.ifname")
+		if [ -z "$iface" ] && [ -n "$wireless_status" ]; then
+			iface=$(printf '%s\n' "$wireless_status" |
+				jsonfilter -e "@.*.interfaces[@.section=\"$section\"].ifname" 2>/dev/null)
+		fi
+		iface=${iface:-$section}
+		case "$device:$iface" in *[!a-zA-Z0-9_.:-]*) continue;; esac
+            case " $sampled " in *" $device "*) ;; *)
+                sample=
+                [ "$device" = "$backhaul_radio" ] || sample=$(rf_survey "$device" "$iface")
+                survey="${survey}${survey:+ }$sample"
+                sampled="$sampled $device "
+            ;; esac
+		case "$device:$iface" in *[!a-zA-Z0-9_.:-]*) continue;; esac
+		case " $radios " in
+			*" $device:"*) ;;
+			*)
+				allowed=$(radio_channels "$iface")
+				[ -z "$allowed" ] || radios="${radios:+$radios }$device:$allowed"
+				;;
+		esac
+		if [ -s /etc/mesh-control/rrm-neighbors ]; then
+			refresh_neighbors "$iface" "$device" "$(uci -q get "wireless.$section.ssid")" "$section" 2>/dev/null
+		fi
+		if associations=$(iwinfo "$iface" assoclist 2>/dev/null) ||
+		   associations=$(wlanconfig "$iface" list sta 2>/dev/null); then
+			bridge_link=$(readlink "/sys/class/net/$iface/master")
+			bridge_name=${bridge_link##*/}
+			clients="$clients
+$(printf '%s\n' "$associations" | awk -v iface="$iface" -v bridge="$bridge_name" '
+	length($1) == 17 && $1 ~ /^[[:xdigit:]][[:xdigit:]](:[[:xdigit:]][[:xdigit:]])+$/ {
+		print tolower($1), iface, bridge
+	}')"
+		else
+			known=0
+		fi
+		info=$(ubus call iwinfo info "{\"device\":\"$iface\"}" 2>/dev/null)
+		driver=$(uci -q get "wireless.$device.type")
+		case " $power_options " in
+			*" $device:"*) ;;
+			*)
+				power=$(printf '%s' "$info" | jsonfilter -e '@.txpower')
+				case "$power" in ''|*[!0-9]*) ;; *) powers="${powers:+$powers / }$device: $power dBm";; esac
+				case "$driver" in
+					mt_dbdc|rtwifi)
+						configured_power=$(uci -q get "wireless.$device.txpower")
+						case "$configured_power" in
+							''|*[!0-9]*) ;;
+							*) powers="${powers:+$powers / }$device: $configured_power%（配置）";;
+						esac
+						power_choices=$(awk 'BEGIN {for(i=1;i<=100;i++) printf "%s%d",(i>1?",":""),i}')
+						power_options="${power_options:+$power_options }$device:%:$power_choices"
+						;;
+					*)
+						power_choices=$(ubus call iwinfo txpowerlist "{\"device\":\"$iface\"}" 2>/dev/null |
+							jsonfilter -e '@.results[*].dbm' |
+							awk '/^[0-9]+$/ && $0 > 0 && $0 <= 100 && !seen[$0]++ {printf "%s%s",sep,$0;sep=","}')
+						[ -z "$power_choices" ] || power_options="${power_options:+$power_options }$device:dBm:$power_choices"
+						;;
+				esac
+				;;
+		esac
+		configured=$(uci -q get "wireless.$device.htmode")
+		mode=$(printf '%s' "$info" | jsonfilter -e '@.htmode')
+		width=${mode:-$configured}
+		width=${width##*[!0-9]}
+		case "$width" in
+			20|40|80|160|320)
+				[ -n "$mode" ] || width="$width MHz（配置）"
+				case "$width" in *MHz*) ;; *) width="$width MHz";; esac
+				widths="${widths:+$widths / }$device: $width"
+				;;
+		esac
+		family=${configured%%[0-9]*}
+		case "$family" in
+			HT|VHT|HE|EHT)
+				modes=$(printf '%s' "$info" | jsonfilter -e '@.htmodes[*]' |
+					awk -v family="$family" '$0 ~ ("^" family "(20|40|80|160|320)$") {
+						printf "%s%s", sep, substr($0,length(family)+1); sep=","
+					}')
+				case " $width_options " in
+					*" $device:"*) ;;
+					*) [ -z "$modes" ] || width_options="${width_options:+$width_options }$device:$modes";;
+				esac
+				;;
+		esac
+		channel=$(iw dev "$iface" info 2>/dev/null | awk '$1 == "channel" { print $2; exit }')
+		[ -n "$channel" ] || channel=$(iwinfo "$iface" info 2>/dev/null |
+			awk '{ for (i = 1; i < NF; i++) if ($i == "Channel:") { print $(i + 1); exit } }')
+		if [ -z "$channel" ]; then
+			channel=$(uci -q get "wireless.$device.channel")
+			[ -z "$channel" ] || channel="$channel（配置）"
+		fi
+		country=$(uci -q get "wireless.$device.country")
+		case " $details " in
+			*" $device:"*) ;;
+			*)
+				frequency=$(printf '%s' "$info" | jsonfilter -e '@.frequency')
+				band=$(uci -q get "wireless.$device.band")
+				case "$band" in
+					2g|5g|6g) ;;
+					*) case "$frequency" in 2[4-5][0-9][0-9]) band=2g;; 5[0-8][0-9][0-9]|59[0-4][0-9]) band=5g;; 59[5-9][0-9]|[67][0-9][0-9][0-9]) band=6g;; *) band=;; esac;;
+				esac
+				current_channel=${channel%%（配置）}
+				case "$current_channel" in *[!0-9]*) current_channel=;; esac
+				case "$country" in *[!A-Za-z0-9]*) country=;; esac
+				details="${details:+$details }$device:$band:$current_channel:$country"
+				;;
+		esac
+		label=
+		[ "$#" -eq 1 ] || label="$section: "
+		[ -z "$channel" ] || channels="${channels:+$channels / }$label$channel"
+		[ -z "$country" ] || countries="${countries:+$countries / }$label$country"
+	done
+	channel_radios="$radios"
+	width_radios="$width_options"
+	power_radios=$(printf '%s' "$power_options" | sed -e 's/:%:/:/g' -e 's/:dBm:/:/g')
+	json_add_string power "$powers"
+	json_add_string powers "$power_options"
+	json_add_boolean radio_bundle 1
+	json_add_string width "$widths"
+	json_add_string widths "$width_options"
+	json_add_string radios "$radios"
+	json_add_string radio_details "$details"
+	json_add_string survey "$survey"
+	json_add_string channel "$channels"
+	json_add_string country "$countries"
+	if [ "$known" = 1 ]; then
+		client_count=$({ printf '%s\n' "$fdb" --- "$clients"; } | awk '
+			$0 == "---" { stations = 1; next }
+			!stations && $2 == "dev" && $0 !~ / (self|permanent|static)( |$)/ {
+				for (i = 4; i < NF; i++) {
+					if ($i == "master") {
+						key = tolower($1) SUBSEP $(i + 1)
+						learned[key] = 1
+						on_port[key, $3] = 1
+						break
+					}
+				}
+			}
+			stations && NF >= 2 {
+				key = $1 SUBSEP $3
+				if ((!learned[key] || on_port[key, $2]) && !seen[$1]++)
+					count++
+			}
+			END { print count + 0 }')
+		json_add_int clients "$client_count"
+	fi
+}
+
+sync_state=/var/run/mesh-control-agent.status
+write_sync_state() {
+	printf '%s %s %s\n' "$$" "$(date +%s)" "$1" >"$sync_state.$$" &&
+		mv -f "$sync_state.$$" "$sync_state"
+}
+
+write_sync_state 0
+while :; do
+	synced=0
+	sent_revision="$applied"
+	json_init
+	json_add_string id "$id"
+	json_add_string host "$(cat /proc/sys/kernel/hostname)"
+	json_add_string applied "$applied"
+	json_add_string error "$error"
+	report_radios
+	[ -z "$survey_request" ] || survey_ack="$survey_request"
+	json_add_string survey_ack "$survey_ack"
+	json_add_string channel_ack "$channel_ack"
+	json_add_string channel_result "$channel_result"
+	if curl -qfsS --proto '=https' --max-time 10 --max-filesize 4096 \
+		--insecure --pinnedpubkey "$pin" -H "@$work/headers" \
+		-H 'Content-Type: application/json' --data-binary "$(json_dump)" \
+		-o "$work/profile" "${url%/}/cgi-bin/mesh-agent" &&
+		json_load_file "$work/profile" 2>/dev/null; then
+		json_get_vars revision ssid key domain roaming channel_request channel_device requested_channel radio_option survey_request
+		channel_target=
+        reserved_radio=
+        [ "$(uci -q get mesh-backhaul.main.enabled)" != 1 ] || reserved_radio=$(uci -q get mesh-backhaul.main.radio)
+		if [ -n "$channel_request" ] && [ "$channel_request" != "$channel_ack" ]; then
+			channel_ack="$channel_request"
+            if [ "$radio_option" = radios ]; then
+                label=无线参数
+                channel_result='无线参数不在 AP 当前上报的可选范围内'
+                if valid_radio_changes "$channel_radios" "$width_radios" "$power_radios" "$requested_channel"; then
+                    channel_target=batch
+                    case ",$requested_channel," in *",$reserved_radio:"*)
+                        [ -z "$reserved_radio" ] || { channel_target=; channel_result='回传频段已锁定，不能单独调整'; };; esac
+                fi
+            elif [ "$radio_option" = channels ]; then
+				label=信道
+				channel_changes=$(printf '%s' "$requested_channel" | tr ',' ' ')
+				channel_result='信道不在 AP 当前上报的可选范围内'
+				if valid_channel_changes "$channel_radios" "$channel_changes"; then
+					channel_target=batch
+				fi
+			elif [ "$radio_option" = bundle ]; then
+				IFS=, read -r next_channel next_width next_power <<EOF
+$requested_channel
+EOF
+				label=无线设置
+				channel_result='无线设置不在 AP 当前上报的可选范围内'
+				if { [ "$next_channel" = - ] || radio_value_allowed "$channel_radios" "$channel_device" "$next_channel"; } &&
+				   { [ "$next_width" = - ] || radio_value_allowed "$width_radios" "$channel_device" "$next_width"; } &&
+				   { [ "$next_power" = - ] || radio_value_allowed "$power_radios" "$channel_device" "$next_power"; } &&
+				   [ "$next_channel:$next_width:$next_power" != '-:-:-' ]; then
+					channel_target="$channel_device"
+					if [ "$next_width" != - ]; then
+						configured=$(uci -q get "wireless.$channel_target.htmode")
+						next_width="${configured%%[0-9]*}$next_width"
+					fi
+				fi
+			else
+				case "$radio_option" in
+					htmode) options=$width_radios; label=通道宽度;;
+					*) radio_option=channel; options=$channel_radios; label=信道;;
+				esac
+				channel_result="${label}不在 AP 当前上报的可选范围内"
+				for radio in $options; do
+					[ "${radio%%:*}" = "$channel_device" ] || continue
+					case ",${radio#*:}," in
+						*,"$requested_channel",*) channel_target="$channel_device";;
+					esac
+				done
+				if [ -n "$channel_target" ] && [ "$radio_option" = htmode ]; then
+					configured=$(uci -q get "wireless.$channel_target.htmode")
+					requested_channel="${configured%%[0-9]*}$requested_channel"
+				fi
+			fi
+		fi
+        if [ -n "$reserved_radio" ] && [ -n "$channel_target" ]; then
+            case "$radio_option" in
+                radios|channels) case ",$requested_channel," in *",$reserved_radio:"*) channel_target=; channel_result='回传频段已锁定，不能单独调整';; esac;;
+                *) if [ "$channel_target" = "$reserved_radio" ]; then channel_target=; channel_result='回传频段已锁定，不能单独调整'; fi;;
+            esac
+        fi
+		if [ -n "$revision" ] && [ "$revision" = "$sent_revision" ] && [ -z "$error" ]; then
+			synced=1
+		fi
+		write_sync_state "$synced"
+		if [ -n "$revision" ] && { [ -n "$channel_target" ] || { [ "$revision" != "$applied" ] && [ "$revision" != "$failed" ]; }; }; then
+			if apply_profile; then
+				applied="$revision"
+				failed= error=
+				[ -z "$channel_target" ] || channel_result="${label}已应用"
+			else
+				result=$?
+				[ -z "$channel_target" ] || channel_result="${label}应用失败，请检查 AP 无线配置"
+				case "$result" in
+					2) error='有待提交的无线配置，将重试';;
+					3) failed="$revision"; error='联发科驱动需要由两个 ASCII 字母或数字编码的移动域';;
+					*) failed="$revision"; error='应用失败，请检查 AP 配置后重启节点服务';;
+				esac
+			fi
+		fi
+	else
+		write_sync_state 0
+	fi
+	sleep 20
+done

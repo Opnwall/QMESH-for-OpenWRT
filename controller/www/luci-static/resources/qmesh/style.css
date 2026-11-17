@@ -1,0 +1,239 @@
+.qmesh {
+	--qm-card: var(--content-bg, #fff);
+	--qm-line: var(--border-color, #dfe8ed);
+	--qm-muted: var(--text-color-secondary, #587182);
+	--qm-accent: #087b89;
+	--qm-text: #243247;
+	color: var(--qm-text);
+	width: 100%;
+	max-width: none;
+}
+.qmesh .qm-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.qmesh .qm-card, .qmesh .qm-tile {
+	background: var(--qm-card);
+	border: 1px solid var(--qm-line);
+	border-radius: 16px;
+	box-shadow: 0 3px 10px #183a4810;
+}
+.qmesh .qm-tile { padding: 1rem; }
+.qmesh .qm-tile > span, .qmesh small { display: block; color: var(--qm-muted); }
+.qmesh .qm-tile strong { display: block; margin-top: .35rem; font-size: 1.2rem; }
+.qmesh .qm-card { margin: 0 0 1rem; padding: 0; }
+.qmesh .qm-card-head {
+	position: static;
+	display: flex;
+	flex-wrap: wrap;
+	gap: .5rem;
+	justify-content: space-between;
+	align-items: center;
+	background: transparent;
+	padding: .85rem 1rem .45rem;
+	border-bottom: 0;
+}
+.qmesh .qm-card-head h3 { margin: 0; padding: 0; font-size: 1.05rem; background: transparent; color: inherit; }
+.qmesh .qm-body { padding: .55rem 1rem 1rem; margin: 0; }
+.qmesh .qm-form-actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: .65rem;
+	border-top: 0;
+}
+.qmesh .qm-field { display: grid; grid-template-columns: minmax(7rem, 30%) minmax(0, 26rem); align-items: center; gap: .5rem; margin-bottom: .85rem; }
+.qmesh .qm-field input:not([type=checkbox]), .qmesh .qm-field select { width: 100%; min-width: 0; }
+.qmesh .qm-switch { position: relative; width: 2.8rem; height: 1.45rem; }
+.qmesh .qm-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.qmesh .qm-track { display: block; height: 100%; border-radius: 1rem; background: #a7b8c2; pointer-events: none; }
+.qmesh .qm-track::before { content: ''; position: absolute; inset: .2rem auto auto .2rem; width: 1.05rem; height: 1.05rem; background: #fff; border-radius: 100%; }
+.qmesh .qm-switch input:checked + .qm-track { background: var(--qm-accent); }
+.qmesh .qm-switch input:checked + .qm-track::before { transform: translateX(1.35rem); }
+.qmesh .qm-switch input:focus-visible + .qm-track { outline: 2px solid var(--qm-accent); outline-offset: 3px; }
+.qmesh .qm-primary, .qmesh .qm-remove { padding: .48rem .85rem; border-radius: .6rem; cursor: pointer; }
+.qmesh .qm-primary { color: #fff; background: var(--qm-accent); border: 1px solid transparent; }
+.qmesh .qm-remove { background: transparent; border: 1px solid var(--qm-line); color: inherit; }
+.qmesh button:disabled { opacity: .6; }
+.qmesh .qm-table { overflow-x: auto; }
+.qmesh table { width: 100%; margin: 0; }
+.qmesh th, .qmesh td { text-align: left; padding: .7rem 1rem; overflow-wrap: anywhere; }
+.qmesh .qm-empty { color: var(--qm-muted); }
+.qmesh .qm-message { padding: .6rem .8rem; border-inline-start: 3px solid var(--qm-accent); }
+.qmesh [hidden] { display: none !important; }
+.qmesh.qm-dark {
+	--qm-card: #1e1e1e;
+	--qm-heading: #333;
+	--qm-line: #3c3c3c;
+	--qm-muted: #b5b5b5;
+	--qm-text: #ccc;
+	--qm-accent: var(--dark-primary, #483d8b);
+	color-scheme: dark;
+}
+.qmesh.qm-dark .qm-card, .qmesh.qm-dark .qm-tile {
+	border: 0;
+	border-radius: .375rem;
+	box-shadow: 0 2px 8px #0003;
+}
+.qmesh.qm-dark .qm-tile, .qmesh.qm-dark .qm-card-head {
+	background: var(--qm-heading);
+}
+.qmesh.qm-dark .qm-card-head {
+	border-radius: .375rem .375rem 0 0;
+}
+.qmesh.qm-dark .qm-field input:not([type=checkbox]), .qmesh.qm-dark .qm-field select {
+	background-color: var(--qm-card);
+	border-color: var(--qm-line);
+	color: var(--qm-text);
+}
+.qmesh.qm-dark .qm-primary, .qmesh.qm-dark .qm-remove { border-radius: .375rem; }
+.qmesh.qm-dark .qm-track { background: #555; }
+.qmesh.qm-dark .qm-node-table tbody tr:nth-child(even) { background: #252526; }
+.qm-overview { --qm-muted: #587182; --qm-line: #dfe8ed; }
+.qm-overview.qm-dark { --qm-muted: #b5b5b5; --qm-line: #3c3c3c; }
+
+@media (max-width: 600px) {
+	.qmesh .qm-summary { gap: .5rem; }
+	.qmesh .qm-tile { min-width: 0; padding: .65rem; overflow-wrap: anywhere; }
+	.qmesh .qm-tile strong { font-size: 1rem; }
+	.qmesh .qm-field { grid-template-columns: minmax(0, 1fr); }
+	.qmesh .qm-field input:not([type=checkbox]), .qmesh .qm-field select {
+		box-sizing: border-box;
+		min-height: 44px;
+		font-size: 16px;
+		color: var(--qm-text);
+	}
+	.qmesh .qm-primary, .qmesh .qm-remove { min-height: 44px; }
+	.qmesh .qm-table { padding-inline: .85rem; }
+	.qm-node-table, .qm-node-table tbody { display: block; width: 100%; }
+	.qm-node-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+	.qm-node-table tbody tr {
+		display: block;
+		margin: .55rem 0;
+		padding: .35rem 0;
+		border: 1px solid var(--qm-line);
+		border-radius: .65rem;
+	}
+	.qm-node-table tbody td[data-label] {
+		display: grid;
+		grid-template-columns: minmax(5rem, 30%) minmax(0, 1fr);
+		gap: .55rem;
+		width: auto;
+		padding: .35rem .65rem;
+		border: 0;
+		font-size: .875rem;
+		white-space: normal;
+		overflow-wrap: anywhere;
+	}
+	.qm-node-table tbody td[data-label]::before {
+		content: attr(data-label);
+		color: var(--qm-muted);
+	}
+	.qm-node-table tbody td[data-label="操作"] button { justify-self: start; }
+}
+
+.qmesh .qm-ap-options { display: flex; flex-wrap: wrap; gap: .6rem 1rem; }
+
+.qmesh .qm-code-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
+
+.qmesh .qm-copy-code.qm-copied { background: var(--qm-accent); color: #fff; }
+@media (prefers-reduced-motion: no-preference) {
+	.qmesh .qm-copy-code.qm-copied { animation: qm-copy-pop .3s ease-out; }
+}
+@keyframes qm-copy-pop {
+	45% { transform: scale(1.08); }
+}
+
+.qm-sync-ok { color: #168044; }
+.qm-sync-failed { color: #bc303b; }
+.qm-dark .qm-sync-ok { color: #59c988; }
+.qm-dark .qm-sync-failed { color: #ff858e; }
+
+.qmesh .qm-channel-control {
+	display: grid;
+	justify-items: start;
+	gap: .35rem;
+}
+
+.qmesh .qm-channel-control select { max-width: 100%; }
+
+.qmesh .qm-node-list td { vertical-align: top; }
+.qmesh .qm-node-list td:is([data-label="客户端"], [data-label="状态"]) {
+	vertical-align: middle;
+}
+.qmesh .qm-node-list :is(th, td):nth-child(3) { font-variant-numeric: tabular-nums; }
+.qmesh .qm-node-list th[data-label="操作"] { text-align: center; }
+.qmesh .qm-node-list td > div > small { margin-top: .2rem; }
+.qmesh .qm-node-list :is(th, td)[data-label="客户端"],
+.qmesh .qm-node-list th:nth-child(3) { text-align: center; }
+.qmesh .qm-node-status { display: flex; flex-wrap: wrap; gap: .25rem .65rem; }
+.qmesh .qm-radio-controls { display: grid; gap: .5rem; }
+.qmesh .qm-radio-line { display: grid; grid-template-columns: minmax(0, 16rem) 6rem; align-items: start; gap: .5rem; }
+.qmesh .qm-radio-line small { margin-top: .2rem; }
+.qmesh .qm-radio-line select { width: 100%; min-width: 0; margin: 0; }
+.qmesh .qm-node-actions { text-align: center; }
+.qmesh .qm-node-actions > small { margin-top: .25rem; }
+.qmesh .qm-node-footer { display: flex; justify-content: flex-end; padding: .65rem 1rem .85rem; }
+
+.qmesh .qm-node-footer .qm-primary:disabled { opacity: 1; cursor: not-allowed; }
+
+@media (min-width: 900px) {
+	.qmesh .qm-node-list { table-layout: fixed; }
+	.qmesh .qm-node-list th[data-label="节点"] { width: 16%; }
+	.qmesh .qm-node-list th[data-label="客户端"] { width: 16%; }
+	.qmesh .qm-node-list th[data-label="状态"] { width: 16%; }
+	.qmesh .qm-node-list th[data-label="操作"] { width: 16%; }
+}
+
+@media (max-width: 600px) {
+	.qmesh .qm-node-actions { text-align: right; }
+	.qmesh .qm-node-list tbody td[data-label="操作"] { display: block; }
+	.qmesh .qm-node-list tbody td[data-label="操作"]::before { display: none; }
+	.qmesh .qm-node-list td[data-label="客户端"] { text-align: left; }
+	.qmesh .qm-radio-line { grid-template-columns: minmax(0, 1fr) minmax(4.5rem, 40%); gap: .45rem; }
+	.qmesh .qm-radio-line select { min-height: 44px; font-size: 16px; }
+	.qmesh .qm-node-footer { padding-inline: .65rem; }
+}
+
+.qmesh .qm-optimize { grid-column: 1 / -1; min-width: 0; padding: .35rem 0; }
+.qmesh .qm-optimize summary { cursor: pointer; font-size: .85rem; }
+.qmesh .qm-opt-fields { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .5rem; }
+.qmesh .qm-opt-fields label { flex: 1 1 5rem; min-width: 0; font-size: .8rem; }
+.qmesh .qm-opt-fields select { display: block; margin-top: .3rem; }
+.qmesh .qm-opt-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-top: .5rem; }
+
+.qmesh .qm-parameter-radio { min-width: 0; padding: .35rem 0; }
+.qmesh .qm-parameter-radio + .qm-parameter-radio { margin-top: .5rem; }
+.qmesh .qm-parameter-radio strong { font-size: .9rem; }
+.qmesh .qm-tuning-node { margin: .75rem 0; padding: .75rem; background: transparent; border: 1px solid #dce4e9; border-radius: .6rem; }
+.qmesh .qm-tuning-node h4 { margin: 0 0 .5rem; }
+.qmesh .qm-tuning-radio { margin: .5rem 0 .9rem; }
+.qmesh .qm-tuning-radio p { margin: .25rem 0; font-size: .9rem; }
+.qmesh.qm-dark .qm-tuning-node { border-color: #444; }
+
+.qmesh .qm-radio-editor { margin-top: .25rem; }
+.qmesh .qm-radio-editor summary { cursor: pointer; font-size: .8rem; width: fit-content; color: #087b89; }
+.qmesh.qm-dark .qm-radio-editor summary { color: #7dcbd3; }
+.qmesh .qm-parameter-radio { padding: .15rem 0; }
+.qmesh .qm-parameter-radio + .qm-parameter-radio { margin-top: .3rem; }
+.qmesh .qm-detect-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; margin-bottom: .6rem; }
+.qmesh .qm-detect-progress { font-size: .85rem; }
+
+.qmesh .qm-radio-editor summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: .25rem .6rem; width: auto; list-style: none; }
+.qmesh .qm-radio-editor summary::-webkit-details-marker { display: none; }
+.qmesh .qm-radio-meta { font-size: .75rem; color: #607d8b; font-weight: normal; }
+.qmesh .qm-adjust-label { white-space: nowrap; }
+.qmesh .qm-adjust-label::after { content: '⌄'; display: inline-block; margin-left: .25rem; font-size: 1rem; }
+.qmesh .qm-radio-editor[open] .qm-adjust-label::after { transform: rotate(180deg); }
+.qmesh.qm-dark .qm-radio-meta { color: #adb5bd; }
+.qmesh .qm-tuning-select { display: inline-flex; align-items: center; gap: .5rem; cursor: pointer; }
+.qmesh .qm-tuning-select input { width: auto; margin: 0; }
+.qmesh .qm-selection-note { font-size: .8rem; margin-right: .7rem; }
+
+.qmesh .qm-tuning-select { vertical-align: middle; line-height: 1.4; margin: 0; }
+.qmesh .qm-tuning-select > input[type="checkbox"] {
+    position: static !important; inset: auto !important; transform: none !important;
+    margin: 0 !important; padding: 0; flex: 0 0 16px; align-self: center;
+    width: 16px; height: 16px; min-height: 0; vertical-align: middle;
+}
+.qmesh .qm-tuning-select > span { display: block; line-height: 1.4; }
+
+.qmesh .qm-password-wrap { position: relative; min-width: 0; }
+.qmesh .qm-password-wrap input { padding-right: 2.8rem; }
+.qmesh button.qm-password-eye { position: absolute; top: 50%; right: .35rem; transform: translateY(-50%); display: inline-flex; align-items: center; justify-content: center; width: 2rem; min-height: 2rem; padding: .2rem; margin: 0; border: 0; box-shadow: none; background: transparent; color: inherit; }

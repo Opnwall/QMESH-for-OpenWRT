@@ -1,0 +1,30 @@
+#!/bin/sh
+uplink=$(uci -q get mesh-backhaul.main.uplink)
+case "$uplink" in lan[1-4]) ;; *) echo 'No supported backhaul uplink configured' >&2; exit 1;; esac
+section=$(uci show network | sed -n "s/^\(network\.[^.]*\)\.name='br-lan'$/\1/p" | head -1)
+[ -n "$section" ] || exit 1
+case "$1" in
+ enable)
+    # The monitor alone owns this port, preventing netifd from reconnecting it
+    # behind the monitor's back while wireless forwarding is active.
+    uci -q del_list "$section.ports=$uplink"
+    uci commit network
+    uci set mesh-backhaul.main.enabled=1
+    uci commit mesh-backhaul
+    /etc/init.d/mesh-backhaul enable
+    /etc/init.d/mesh-backhaul restart
+    ;;
+ disable|suspend)
+    /etc/init.d/mesh-backhaul stop
+    /etc/init.d/mesh-backhaul disable
+    uci -q del_list "$section.ports=$uplink"
+    uci add_list "$section.ports=$uplink"
+    uci commit network
+    if [ "$1" = disable ]; then
+        uci set mesh-backhaul.main.enabled=0
+        uci commit mesh-backhaul
+    fi
+    ip link set "$uplink" master br-lan
+    ;;
+ *) echo 'Usage: mesh-backhaulctl enable|disable|suspend' >&2; exit 1;;
+esac

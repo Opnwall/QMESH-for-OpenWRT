@@ -1,0 +1,148 @@
+agent=/etc/init.d/mesh-control-agent
+agent_config=/etc/config/mesh-control-agent
+
+available_aps() {
+	for section in $(uci -q show wireless | sed -n 's/^wireless\.\([a-zA-Z0-9_]*\)=wifi-iface$/\1/p'); do
+		[ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
+		[ "$(uci -q get "wireless.$section.disabled")" != 1 ] || continue
+		device=$(uci -q get "wireless.$section.device")
+		[ -n "$device" ] && [ "$(uci -q get "wireless.$device.disabled")" != 1 ] && printf '%s\n' "$section"
+	done
+}
+
+agent_option() {
+	uci -q get "mesh-control-agent.main.$1"
+}
+
+write_role() {
+    touch /etc/config/qmesh || return 1
+    uci set qmesh.main=main && uci set "qmesh.main.role=$1" && uci commit qmesh || return 1
+	printf '%s\n' "$1" >"$state/role.new" && mv "$state/role.new" "$state/role" || return 1
+    touch "$state/controller-menu"
+    /usr/share/mesh-control/menu-sync "$1" || return 1
+}
+
+claim_batch() {
+	local batch="$1" url="$2" pin="$3"
+	local nonce previous hash scratch http payload
+	hash=$(printf '%s' "$batch" | sha256sum)
+	hash=${hash%% *}
+	if [ -r "$state/join-request" ]; then
+		read -r previous nonce <"$state/join-request"
+	fi
+	if [ "$previous" != "$hash" ] || ! valid_secret "$nonce"; then
+		nonce=$(hexdump -n 32 -e '32/1 "%02x"' /dev/urandom)
+		valid_secret "$nonce" || return 1
+		printf '%s %s\n' "$hash" "$nonce" >"$state/join-request.new" &&
+			mv "$state/join-request.new" "$state/join-request" || return 1
+	fi
+	scratch=$(mktemp -d "$state/claim.XXXXXX") || return 1
+	printf 'Authorization: Bearer %s\n' "$batch" >"$scratch/headers"
+	payload=$(printf '{"action":"claim","nonce":"%s"}' "$nonce")
+	http=$(curl -qsS --proto '=https' --connect-timeout 4 --max-time 8 --max-filesize 4096 \
+		--insecure --pinnedpubkey "$pin" -H "@$scratch/headers" \
+		-H 'Content-Type: application/json' --data-binary "$payload" \
+		-o "$scratch/response" -w '%{http_code}' "$url/cgi-bin/mesh-agent" 2>/dev/null)
+	if [ "$http" = 200 ]; then cat "$scratch/response"; fi
+	rm -f "$scratch/headers" "$scratch/response"
+	rmdir "$scratch"
+	case "$http" in
+		200) return 0;;
+		403|410) return 2;;
+		*) return 1;;
+	esac
+}
+
+switch_role() {
+	local role id url pin token aps section available old_role replace=0 backup batch claim
+	json_load "$(cat)" || return 1
+	json_get_vars role id url pin token aps batch
+	old_role=$(local_role)
+	case "$role" in
+		controller)
+			if [ -x "$agent" ]; then
+				if "$agent" running && ! "$agent" stop >/dev/null 2>&1; then
+					reply 0 '停止 AP Agent 失败'
+					return
+				fi
+				"$agent" disable >/dev/null 2>&1 || { reply 0 '关闭 Agent 自启动失败'; return; }
+			fi
+			write_role controller || return 1
+			reply 1 '已切换为控制器'
+			;;
+		ap)
+			[ -x "$agent" ] || { reply 0 '请先安装 MESH Agent'; return; }
+			[ -n "$token$batch" ] && replace=1
+			[ -n "$id" ] || id=$(agent_option id)
+			[ -n "$url" ] || url=$(agent_option url)
+			[ -n "$pin" ] || pin=$(agent_option pin)
+			[ -n "$aps" ] || aps=$(agent_option ap)
+			if [ "$replace" = 0 ]; then
+				# A saved token belongs to the previously configured upstream and node.
+				if [ "$id" != "$(agent_option id)" ] || [ "$url" != "$(agent_option url)" ] ||
+				   [ "$pin" != "$(agent_option pin)" ]; then
+					reply 0 '变更控制器或节点身份时，请输入新的注册令牌'
+					return
+				fi
+				token=$(agent_option token)
+			fi
+			case "$url$pin" in *[!A-Za-z0-9.:/+=\[\]-]*) reply 0 '控制器地址或指纹格式无效'; return;; esac
+			if ! printf '%s\n' "$url" | grep -qxE 'https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?' ||
+			   ! printf '%s\n' "$pin" | grep -qxE 'sha256//[A-Za-z0-9+/]{43}=' ||
+			   [ -z "$aps" ]; then
+				reply 0 '请提供有效接入码和无线接口'
+				return
+			fi
+			available=$(available_aps)
+			for section in $aps; do
+				if ! printf '%s\n' "$available" | grep -Fxq "$section"; then
+					reply 0 '请选择已启用的本机无线 AP 接口'
+					return
+				fi
+			done
+			if [ -n "$batch" ]; then
+				valid_secret "$batch" || { reply 0 '批量接入码格式无效'; return; }
+				if claim=$(claim_batch "$batch" "$url" "$pin"); then
+					json_load "$claim" && json_get_vars id token
+				else
+					case "$?" in
+						2) reply 0 '接入码已过期、已失效或凭据已撤销';;
+						*) reply 0 '无法连接控制器领取凭据，请检查地址和证书';;
+					esac
+					return
+				fi
+			fi
+			if ! valid_id "$id" || ! valid_secret "$token"; then
+				reply 0 '节点 ID 或独立令牌无效'
+				return
+			fi
+			backup=$(mktemp "$state/agent-backup.XXXXXX") || return 1
+			if [ -f "$agent_config" ]; then
+				cp "$agent_config" "$backup" || { rm -f "$backup"; return 1; }
+			fi
+			{
+				printf "config agent 'main'\n\toption id '%s'\n\toption url '%s'\n\toption pin '%s'\n\toption token '%s'\n" "$id" "$url" "$pin" "$token"
+				for section in $aps; do printf "\tlist ap '%s'\n" "$section"; done
+			} >"$agent_config.new" && mv "$agent_config.new" "$agent_config" || { rm -f "$backup"; return 1; }
+			if write_role ap && "$agent" enable >/dev/null 2>&1 && "$agent" restart >/dev/null 2>&1; then
+				rm -f "$backup"
+				reply 1 '已切换为 AP，Agent 将连接上级控制器'
+				return
+			fi
+			if [ -s "$backup" ]; then
+				mv "$backup" "$agent_config"
+			else
+				rm -f "$backup" "$agent_config"
+			fi
+			write_role "$old_role"
+			if [ "$old_role" = ap ]; then
+				"$agent" restart >/dev/null 2>&1
+			else
+				"$agent" stop >/dev/null 2>&1
+				"$agent" disable >/dev/null 2>&1
+			fi
+			reply 0 '启动 AP Agent 失败，已恢复原角色'
+			;;
+		*) reply 0 '角色无效';;
+	esac
+}

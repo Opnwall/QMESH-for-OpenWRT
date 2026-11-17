@@ -1,0 +1,7 @@
+{
+  "mesh-control": {
+    "description": "Manage Mesh controller",
+    "read": { "ubus": { "mesh.control": ["status", "fingerprint"] } },
+    "write": { "ubus": { "mesh.control": ["password", "set_backhaul", "detect", "save", "join_code", "active_join_code", "enroll", "revoke", "set_channel", "set_channels", "set_width", "set_radio", "set_radios", "set_role"] } }
+  }
+}

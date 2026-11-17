@@ -1,0 +1,15 @@
+#!/bin/sh
+role=${1:-$(cat /etc/mesh-control/role 2>/dev/null)}
+menu=/usr/share/luci/menu.d/luci-app-qmesh.json
+{
+cat <<'JSON'
+{"admin/network/qmesh":{"title":"QMESH","order":41,"action":{"type":"firstchild"},"depends":{"acl":["mesh-control"]}},"admin/network/qmesh/general":{"title":"常规设置","order":1,"action":{"type":"view","path":"network/qmesh_ap_0163"}}
+JSON
+if true; then
+cat <<'JSON'
+,"admin/network/qmesh/nodes":{"title":"节点列表","order":2,"action":{"type":"view","path":"network/qmesh_ap_0163"}},"admin/network/qmesh/tuning":{"title":"设备调优","order":3,"action":{"type":"view","path":"network/qmesh_ap_0163"}}
+JSON
+fi
+printf '}\n'
+} >"$menu.new" && chmod 644 "$menu.new" && mv "$menu.new" "$menu" || exit 1
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*.json

@@ -1,0 +1,48 @@
+{
+  "admin/network/qmesh": {
+    "title": "QMESH",
+    "order": 41,
+    "action": {
+      "type": "firstchild"
+    },
+    "depends": {
+      "acl": [
+        "mesh-control"
+      ]
+    }
+  },
+  "admin/network/qmesh/general": {
+    "title": "常规设置",
+    "order": 1,
+    "action": {
+      "type": "view",
+      "path": "network/qmesh_ap_0163"
+    }
+  },
+  "admin/network/qmesh/nodes": {
+    "title": "节点列表",
+    "order": 2,
+    "action": {
+      "type": "view",
+      "path": "network/qmesh_ap_0163"
+    },
+    "depends": {
+      "fs": {
+        "/etc/mesh-control/controller-menu": "file"
+      }
+    }
+  },
+  "admin/network/qmesh/tuning": {
+    "title": "设备调优",
+    "order": 3,
+    "action": {
+      "type": "view",
+      "path": "network/qmesh_ap_0163"
+    },
+    "depends": {
+      "fs": {
+        "/etc/mesh-control/controller-menu": "file"
+      }
+    }
+  }
+}

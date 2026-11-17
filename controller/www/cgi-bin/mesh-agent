@@ -1,0 +1,100 @@
+#!/bin/sh
+. /usr/share/mesh-control/common
+
+deny() {
+	printf 'Status: %s\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n\r\n' "$1"
+	exit
+}
+
+[ "$HTTPS" = on ] || deny '403 Forbidden'
+[ "$REQUEST_METHOD" = POST ] || deny '405 Method Not Allowed'
+case "$CONTENT_LENGTH" in ''|*[!0-9]*) deny '400 Bad Request';; esac
+[ "$CONTENT_LENGTH" -le 8192 ] 2>/dev/null || deny '413 Payload Too Large'
+case "$HTTP_AUTHORIZATION" in 'Bearer '*) token="${HTTP_AUTHORIZATION#Bearer }";; *) deny '403 Forbidden';; esac
+valid_secret "$token" || deny '403 Forbidden'
+
+payload=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+parsed=$(jshn -r "$payload" 2>/dev/null) || deny '400 Bad Request'
+eval "$parsed"
+json_get_vars action nonce id host applied error channel country clients radios radio_details width widths power powers radio_bundle survey survey_ack backhaul backhaul_radio channel_ack channel_result
+exec 9>"$state/.lock"
+flock -x 9 || deny '503 Service Unavailable'
+[ "$(local_role)" = controller ] || deny '403 Forbidden'
+if [ "$action" = claim ]; then
+	valid_secret "$nonce" || deny '400 Bad Request'
+	read -r batch expires <"$state/batch" 2>/dev/null || deny '403 Forbidden'
+	[ "$token" = "$batch" ] || deny '403 Forbidden'
+	[ "$(date +%s)" -lt "$expires" ] || deny '410 Gone'
+	id=$(awk -v nonce="$nonce" '$1 == nonce { print $2; exit }' "$state/batch-claims")
+	if [ -n "$id" ]; then
+		# A revoked claim stays revoked for the lifetime of this batch.
+		token=$(cat "$state/nodes/$id/token" 2>/dev/null) || deny '403 Forbidden'
+	else
+		id="ap-$(hexdump -n 12 -e '12/1 "%02x"' /dev/urandom)"
+		[ "${#id}" = 27 ] && register_node || deny '503 Service Unavailable'
+		if ! printf '%s %s\n' "$nonce" "$id" >>"$state/batch-claims"; then
+			rm -f "$state/nodes/$id/token"
+			rmdir "$state/nodes/$id"
+			deny '503 Service Unavailable'
+		fi
+	fi
+	printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+	json_init
+	json_add_string id "$id"
+	json_add_string token "$token"
+	json_dump
+	exit
+fi
+valid_id "$id" || deny '403 Forbidden'
+dir="$state/nodes/$id"
+[ -f "$dir/token" ] && [ "$(cat "$dir/token")" = "$token" ] || deny '403 Forbidden'
+if [ -s "$dir/survey-request" ]; then
+    read -r survey_request started <"$dir/survey-request"
+    if [ "$survey_request" = "$survey_ack" ]; then rm -f "$dir/survey-request"; survey_request=; fi
+fi
+request= device= target= option=
+if [ -s "$dir/channel-request" ]; then
+	read -r request device target option <"$dir/channel-request"
+fi
+if [ -n "$request" ] && [ "$request" = "$channel_ack" ] && [ -n "$channel_result" ]; then
+	printf '%s\n' "$channel_result" >"$dir/channel-result.new" &&
+		mv "$dir/channel-result.new" "$dir/channel-result" &&
+		rm -f "$dir/channel-request" || deny '503 Service Unavailable'
+	request=
+fi
+json_init
+json_add_string radios "$radios"
+json_add_string radio_details "$radio_details"
+json_add_string survey_ack "$survey_ack"
+json_add_string backhaul "$backhaul"
+json_add_string backhaul_radio "$backhaul_radio"
+json_add_string survey "$(printf '%s' "$survey" | cut -c1-2048)"
+json_add_string width "$width"
+json_add_string widths "$widths"
+json_add_string power "$power"
+json_add_string powers "$powers"
+json_add_boolean radio_bundle "$([ "$radio_bundle" = 1 ] && echo 1 || echo 0)"
+json_add_int seen "$(date +%s)"
+json_add_string host "$host"
+json_add_string applied "$applied"
+json_add_string channel "$channel"
+json_add_string country "$country"
+add_client_count "$clients"
+json_add_string error "$error"
+json_add_string addr "$REMOTE_ADDR"
+json_dump >"$dir/status.new" && mv "$dir/status.new" "$dir/status" || deny '503 Service Unavailable'
+
+printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+if [ -s "$state/profile" ]; then
+    json_load_file "$state/profile" || deny '503 Service Unavailable'
+else
+    json_init
+fi
+if [ -n "$request" ]; then
+    json_add_string channel_request "$request"
+    json_add_string channel_device "$device"
+    json_add_string radio_option "$option"
+    json_add_string requested_channel "$target"
+fi
+[ -z "$survey_request" ] || json_add_string survey_request "$survey_request"
+json_dump

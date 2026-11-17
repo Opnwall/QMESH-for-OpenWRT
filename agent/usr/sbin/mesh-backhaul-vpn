@@ -1,0 +1,18 @@
+#!/bin/sh
+. /lib/functions.sh
+config_load mesh-backhaul
+config_get_bool enabled main enabled 0
+[ "$enabled" = 1 ] || exit 0
+config_get iface main underlay
+case "$iface" in ra1|apcli0) ;; *) exit 1;; esac
+# This vendor build may leave the AP Client down after a wireless reload.
+while :; do
+    [ "$iface" != apcli0 ] || ip link set apcli0 up 2>/dev/null
+    ip -4 addr show dev "$iface" 2>/dev/null | grep -q '172.31.254.' && break
+    sleep 2
+done
+[ "$iface" != apcli0 ] || iwpriv apcli0 set PSMode=CAM >/dev/null 2>&1
+exec /usr/sbin/openvpn --config /etc/mesh-control/backhaul/openvpn.conf \
+    --script-security 2 --up-delay --up-restart \
+    --up /usr/share/mesh-control/backhaul-vpn-event \
+    --down /usr/share/mesh-control/backhaul-vpn-event

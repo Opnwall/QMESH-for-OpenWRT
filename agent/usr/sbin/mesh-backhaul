@@ -1,0 +1,110 @@
+#!/bin/sh
+# Paired standby bridge: detach old path before advertising or enabling the new one.
+. /lib/functions.sh
+config_load mesh-backhaul
+config_get_bool enabled main enabled 0
+[ "$enabled" = 1 ] || exit 0
+config_get uplink main uplink
+config_get iface main underlay
+config_get peer main peer
+config_get local_ip main local_ip
+config_get gateway main gateway 192.168.101.1
+case "$gateway" in ''|*[!0-9.]*) exit 1;; esac
+case "$uplink:$iface:$local_ip:$peer" in
+ lan[1-4]:ra1:172.31.254.1:172.31.254.2|lan[1-4]:apcli0:172.31.254.2:172.31.254.1) ;;
+ *) logger -t mesh-backhaul 'Invalid backhaul configuration'; exit 1;;
+esac
+control=$(cat /etc/mesh-control/backhaul/control-path)
+pin=$(cat /etc/mesh-control/backhaul/peer-pin)
+case "$pin" in sha256//*) ;; *) exit 1;; esac
+role=server; [ "$iface" != apcli0 ] || role=client
+case "$control" in ''|*[!a-f0-9]*) exit 1;; esac
+[ "${#control}" = 48 ] || exit 1
+umask 077
+run=/var/run/mesh-backhaul
+mkdir -p "$run/http"
+chmod 755 "$run" "$run/http"
+tap=mesh-bh-tap
+mode=starting
+stable=0
+[ "$(cat "/sys/class/net/$uplink/carrier" 2>/dev/null)" != 1 ] || stable=3
+master() { basename "$(readlink "/sys/class/net/$1/master" 2>/dev/null)" 2>/dev/null; }
+unbridge() { [ "$(master "$1")" != br-lan ] || ip link set "$1" nomaster; }
+bridge() { [ "$(master "$1")" = br-lan ] || ip link set "$1" master br-lan; }
+publish() {
+    printf 'v1 %s %s\n' "$1" "$(date +%s)" >"$run/http/$control.new" &&
+        chmod 644 "$run/http/$control.new" && mv "$run/http/$control.new" "$run/http/$control"
+}
+status() {
+    if [ "$mode" != "$1" ]; then
+        logger -t mesh-backhaul "$mode -> $1"
+        printf '%s %s -> %s\n' "$(date +%s)" "$mode" "$1" >>"$run/events"
+        mode=$1
+        # Force upstream switches to relearn the unchanged LAN MAC on the
+        # new path; otherwise a silent AP can remain unreachable until aging.
+        case "$mode" in wired|wireless) ping -I br-lan -c 1 -W 1 "$gateway" >/dev/null 2>&1 &;; esac
+    fi
+    printf '%s\n' "$mode" >"$run/mode.new" && mv "$run/mode.new" "$run/mode"
+}
+cleanup() {
+    unbridge "$tap"
+    publish down
+    bridge "$uplink"
+    status disabled
+    kill "$http_pid" 2>/dev/null
+}
+trap 'exit 0' TERM INT
+trap cleanup EXIT
+# The listener is bound only to the isolated encrypted Wi-Fi underlay.
+while ! ip -4 addr show dev "$iface" 2>/dev/null | grep -q "$local_ip/30"; do
+    [ "$iface" != apcli0 ] || ip link set apcli0 up 2>/dev/null
+    sleep 2
+done
+/usr/sbin/uhttpd -f -s "$local_ip:17891" -C "/etc/mesh-control/backhaul/$role.crt" -K "/etc/mesh-control/backhaul/$role.key" -h "$run/http" >/dev/null 2>&1 &
+http_pid=$!
+while :; do
+    [ "$iface" != apcli0 ] || ip link set apcli0 up 2>/dev/null
+    carrier=$(cat "/sys/class/net/$uplink/carrier" 2>/dev/null)
+    [ "$carrier" = 1 ] && stable=$((stable + 1)) || stable=0
+    if [ "$stable" -ge 3 ]; then
+        # On recovery this ordering is essential: both ends see wired BEFORE
+        # the second LAN path can be connected.
+        if [ "$(master "$uplink")" != br-lan ]; then
+            unbridge "$tap" || { sleep 1; continue; }
+            publish wired || { sleep 1; continue; }
+            bridge "$uplink" || { sleep 1; continue; }
+        else
+            publish wired
+        fi
+        local_state=wired
+    else
+        unbridge "$uplink" || { sleep 1; continue; }
+        publish wireless || { sleep 1; continue; }
+        local_state=wireless
+    fi
+    response=$(curl -qfsS --noproxy '*' --proto '=https' --insecure --pinnedpubkey "$pin" --interface "$iface" --connect-timeout 1 --max-time 1 "https://$peer:17891/$control" 2>/dev/null)
+    read -r version peer_state seen <<EOF
+$response
+EOF
+    now=$(date +%s)
+    case "$seen" in ''|*[!0-9]*) peer_state=unknown;; *)
+        [ "$version" = v1 ] && [ "$((now - seen))" -ge -2 ] && [ "$((now - seen))" -le 8 ] || peer_state=unknown;;
+    esac
+    case "$peer_state" in wired|wireless) ;; *) peer_state=unknown;; esac
+    if [ "$local_state" = wired ] && [ "$peer_state" != wireless ]; then
+        unbridge "$tap"
+        status wired
+    elif [ -f "$run/vpn-up" ] && ip link show "$tap" >/dev/null 2>&1 && [ "$peer_state" != unknown ]; then
+        ip link set "$tap" up
+        bridge "$tap" || { status failed; sleep 1; continue; }
+        [ "$local_state" != wireless ] || ping -I br-lan -c 1 -W 1 "$gateway" >/dev/null 2>&1
+        if [ "$local_state" = wired ]; then status wired-relay
+        elif [ "$peer_state" = wired ]; then status wireless
+        else status isolated
+        fi
+    else
+        unbridge "$tap"
+        [ "$local_state" = wired ] && status wired || status failed
+    fi
+    sleep 1
+done

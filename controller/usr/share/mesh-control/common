@@ -1,0 +1,99 @@
+. /usr/share/libubox/jshn.sh
+state=/etc/mesh-control
+umask 077
+mkdir -p "$state/nodes" || exit 1
+valid_id() {
+	case "$1" in ''|*[!a-zA-Z0-9_-]*) return 1;; esac
+	[ "${#1}" -le 40 ]
+}
+reply() {
+	json_init
+	json_add_boolean ok "$1"
+	json_add_string message "$2"
+	json_dump
+}
+
+local_role() {
+    local saved
+    saved=$(uci -q get qmesh.main.role)
+    case "$saved" in ap|controller) printf '%s\n' "$saved"; return;; esac
+    saved=$(cat "$state/role" 2>/dev/null)
+    case "$saved" in ap|controller) printf '%s\n' "$saved"; return;; esac
+    # Recover an AP after firmware restore when only UCI configuration survived.
+    if [ -n "$(uci -q get mesh-control-agent.main.id)" ] &&
+       [ -n "$(uci -q get mesh-control-agent.main.url)" ] &&
+       [ -n "$(uci -q get mesh-control-agent.main.token)" ] &&
+       [ -n "$(uci -q get mesh-control-agent.main.ap)" ]; then
+        echo ap
+    else
+        echo controller
+    fi
+}
+
+add_client_count() {
+	case "$1" in ''|*[!0-9]*) return;; esac
+	[ "${#1}" -le 6 ] && json_add_int clients "$1"
+}
+
+radio_value_allowed() {
+	local entry
+	for entry in $1; do
+		[ "${entry%%:*}" = "$2" ] || continue
+		case ",${entry#*:}," in *,"$3",*) return 0;; esac
+	done
+	return 1
+}
+
+valid_channel_changes() {
+	local change device channel seen=
+	for change in $2; do
+		device=${change%%:*}
+		channel=${change#*:}
+		case "$device:$channel" in :*|*:|*[!A-Za-z0-9_:]*) return 1;; esac
+		case "$channel" in *[!0-9]*) return 1;; esac
+		case " $seen " in *" $device "*) return 1;; esac
+		radio_value_allowed "$1" "$device" "$channel" || return 1
+		seen="$seen $device"
+	done
+	[ -n "$seen" ]
+}
+
+register_node() {
+	token=$(hexdump -n 32 -e '32/1 "%02x"' /dev/urandom)
+	[ "${#token}" = 64 ] || return 1
+	local dir="$state/nodes/$id"
+	mkdir "$dir" || return 1
+	if ! printf '%s\n' "$token" >"$dir/token"; then
+		rm -f "$dir/token"
+		rmdir "$dir"
+		return 1
+	fi
+}
+
+valid_secret() {
+	case "$1" in *[!0-9a-f]*) return 1;; esac
+	[ "${#1}" -eq 64 ]
+}
+
+# device:channel:width:power entries, comma separated. '-' preserves a value.
+valid_radio_changes() {
+    local change device channel width power rest seen= value
+    case "$4" in ''|,*|*,|*,,*|*[!A-Za-z0-9_:,-]*) return 1;; esac
+    for change in $(printf '%s' "$4" | tr ',' ' '); do
+        device=${change%%:*}; rest=${change#*:}
+        channel=${rest%%:*}; rest=${rest#*:}
+        width=${rest%%:*}; power=${rest#*:}
+        case "$device" in ''|*[!A-Za-z0-9_]*) return 1;; esac
+        case " $seen " in *" $device "*) return 1;; esac
+        [ "$change" = "$device:$channel:$width:$power" ] || return 1
+        [ "$channel:$width:$power" != '-:-:-' ] || return 1
+        for value in "$channel" "$width" "$power"; do
+            case "$value" in -) ;; ''|*[!0-9]*) return 1;; esac
+        done
+        { [ "$channel" = - ] || radio_value_allowed "$1" "$device" "$channel"; } &&
+        { [ "$width" = - ] || radio_value_allowed "$2" "$device" "$width"; } &&
+        { [ "$power" = - ] || radio_value_allowed "$3" "$device" "$power"; } || return 1
+        seen="$seen $device"
+    done
+    [ -n "$seen" ]
+}

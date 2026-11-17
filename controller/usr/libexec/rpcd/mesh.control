@@ -1,0 +1,413 @@
+#!/bin/sh
+. /usr/share/mesh-control/common
+. /usr/share/mesh-control/role
+
+case "$1" in
+	list)
+		echo '{"status":{},"password":{},"set_backhaul":{"enabled":true},"detect":{"ids":""},"fingerprint":{},"join_code":{},"active_join_code":{},"set_role":{"role":"","id":"","url":"","pin":"","token":"","aps":"","batch":""},"save":{"ssid":"","key":"","roaming":true},"enroll":{"id":""},"revoke":{"id":""},"set_channel":{"id":"","device":"","channel":""},"set_channels":{"id":"","channels":""},"set_width":{"id":"","device":"","channel":""},"set_radios":{"id":"","changes":""},"set_radio":{"id":"","device":"","channel":"","width":"","power":""}}'
+		exit
+		;;
+	call) ;;
+	*) exit 1;;
+esac
+
+exec 9>"$state/.lock"
+flock -x 9 || exit 1
+case "$2" in
+	detect|save|enroll|revoke|set_channels|set_channel|set_width|set_radios|set_radio|fingerprint|join_code|active_join_code)
+		[ "$(local_role)" = controller ] || { reply 0 '此操作仅适用于控制器角色'; exit; }
+		;;
+esac
+case "$2" in
+    password)
+        [ "$(local_role)" = controller ] || { reply 0 '仅控制器可读取无线密码'; exit; }
+        key=
+        [ ! -s "$state/profile" ] || { json_load_file "$state/profile"; json_get_var key key; }
+        json_init; json_add_boolean ok 1; json_add_string key "$key"; json_dump
+        ;;
+    set_backhaul)
+        json_load "$(cat)" || exit 1
+        json_get_var enabled enabled
+        case "$enabled" in 0|1) ;; *) reply 0 '回传设置无效'; exit;; esac
+        [ -s /etc/config/mesh-backhaul ] && [ -x /usr/sbin/mesh-backhaulctl ] && [ -x /usr/sbin/openvpn ] || { reply 0 '本机尚未配置配对回传链路'; exit; }
+        uplink=$(uci -q get mesh-backhaul.main.uplink)
+        case "$uplink" in lan[1-4]) ;; *) reply 0 '上联端口配置无效'; exit;; esac
+        if [ "$enabled" = 0 ] && [ "$(cat /sys/class/net/$uplink/carrier 2>/dev/null)" != 1 ]; then
+            reply 0 '请先恢复有线连接，再关闭双回传'; exit
+        fi
+        action=disable; [ "$enabled" != 1 ] || action=enable
+        if /usr/sbin/mesh-backhaulctl "$action" >/var/run/mesh-backhaul-action.log 2>&1; then
+            reply 1 '回传设置已应用'
+        else reply 0 '应用失败，请检查回传服务日志'; fi
+        ;;
+	set_role) switch_role ;;
+	fingerprint|join_code|active_join_code)
+		if [ "$2" = active_join_code ]; then
+			if [ ! -r "$state/batch" ] ||
+			   ! read -r batch expires <"$state/batch" ||
+			   ! valid_secret "$batch" ||
+			   ! [ "$expires" -gt "$(date +%s)" ] 2>/dev/null; then
+				reply 1 ''
+				exit
+			fi
+		fi
+		if ! command -v openssl >/dev/null 2>&1; then
+			reply 0 '请安装 openssl-util 后再读取公钥指纹'
+			exit
+		fi
+		cert=$(uci -q get uhttpd.main.cert)
+		if [ ! -r "$cert" ]; then
+			reply 0 '找不到 uhttpd 主实例的 HTTPS 证书'
+			exit
+		fi
+		if ! fingerprint=$(
+			set -o pipefail
+			openssl x509 -in "$cert" -pubkey -noout |
+				openssl pkey -pubin -outform DER |
+				openssl dgst -sha256 -binary |
+				openssl base64 -A
+		) 2>/dev/null || [ "${#fingerprint}" -ne 44 ]; then
+			reply 0 '无法从 HTTPS 证书计算公钥指纹'
+			exit
+		fi
+		if [ "$2" != fingerprint ]; then
+			lan=$(ubus call network.interface.lan status 2>/dev/null |
+				jsonfilter -e '@["ipv4-address"][0].address')
+			if [ -z "$lan" ]; then
+				reply 0 '控制器的 LAN 接口没有可用的 IPv4 地址'
+				exit
+			fi
+			port=
+			for listener in $(uci -q get uhttpd.main.listen_https); do
+				case "${listener%:*}" in "$lan"|0.0.0.0|'') ;; *) continue;; esac
+				candidate=${listener##*:}
+				case "$candidate" in ''|*[!0-9]*) continue;; esac
+				[ -n "$port" ] || port=$candidate
+				if [ "$candidate" = 443 ]; then port=443; break; fi
+			done
+			if [ -z "$port" ]; then
+				reply 0 'uhttpd 主实例未在 LAN 地址上提供 HTTPS'
+				exit
+			fi
+			url="https://$lan"
+			[ "$port" = 443 ] || url="$url:$port"
+		fi
+		if [ "$2" = join_code ]; then
+			batch=$(hexdump -n 32 -e '32/1 "%02x"' /dev/urandom)
+			[ "${#batch}" = 64 ] || exit 1
+			expires=$(($(date +%s) + 1800))
+			printf '%s %s\n' "$batch" "$expires" >"$state/batch.new" &&
+				: >"$state/batch-claims" &&
+				mv "$state/batch.new" "$state/batch" || exit 1
+		fi
+		json_init
+		json_add_boolean ok 1
+		json_add_string pin "sha256//$fingerprint"
+		if [ "$2" != fingerprint ]; then
+			json_add_string url "$url"
+			json_add_string batch "$batch"
+			json_add_int expires "$expires"
+			json_add_int remaining "$((expires - $(date +%s)))"
+		fi
+		json_dump
+		;;
+	status)
+		ssid= roaming=0 revision=
+		now=$(date +%s)
+		if [ -s "$state/profile" ]; then
+			json_load_file "$state/profile"
+			json_get_vars ssid roaming revision key
+		fi
+		json_init
+		role=$(local_role)
+		json_add_string role "$role"
+		json_add_string backhaul "$(cat /var/run/mesh-backhaul/mode 2>/dev/null)"
+        json_add_boolean backhaul_available "$([ -s /etc/config/mesh-backhaul ] && echo 1 || echo 0)"
+        json_add_boolean backhaul_enabled "$([ "$(uci -q get mesh-backhaul.main.enabled)" = 1 ] && echo 1 || echo 0)"
+		if [ "$role" = ap ]; then
+			synced=0
+			sync_state=/var/run/mesh-control-agent.status
+			if [ -r "$sync_state" ] && read -r pid checked result <"$sync_state"; then
+				case "$pid:$checked" in
+					:*|*:|*[!0-9:]*) ;;
+					*)
+						if [ "$result" = 1 ] && [ "$pid" -gt 0 ] &&
+						   [ "$checked" -le "$now" ] && [ "$((now - checked))" -le 60 ] &&
+						   kill -0 "$pid" 2>/dev/null; then
+							synced=1
+						fi
+						;;
+				esac
+			fi
+			json_add_boolean ap_synced "$synced"
+		fi
+		json_add_boolean agent_installed "$([ -x "$agent" ] && echo 1 || echo 0)"
+		json_add_string available_aps "$(available_aps | xargs)"
+		json_add_string agent_id "$(agent_option id)"
+		json_add_string agent_url "$(agent_option url)"
+		json_add_string agent_pin "$(agent_option pin)"
+		json_add_string agent_aps "$(agent_option ap)"
+		json_add_boolean has_key "$([ -n "$key" ] && echo 1 || echo 0)"
+		json_add_string ssid "$ssid"
+		json_add_string revision "$revision"
+		json_add_boolean roaming "${roaming:-0}"
+		json_add_array nodes
+		for dir in "$state"/nodes/*; do
+			[ -f "$dir/token" ] || continue
+			seen=0 host= applied= error= addr= channel= country= clients= radios= radio_details= width= widths= power= powers= survey= survey_ack= backhaul= backhaul_radio= radio_bundle=0
+			if [ -s "$dir/status" ]; then
+				json_set_namespace node_
+				json_load_file "$dir/status"
+				json_get_vars seen host applied error addr channel country clients radios radio_details width widths power powers radio_bundle survey survey_ack backhaul backhaul_radio
+				json_set_namespace ""
+			fi
+			json_add_object
+			json_add_string id "${dir##*/}"
+			json_add_string host "$host"
+			json_add_string addr "$addr"
+			json_add_string applied "$applied"
+			json_add_string channel "$(printf '%s' "$channel" | sed 's/（配置）//g')"
+			json_add_string country "$country"
+			json_add_string radios "$radios"
+			json_add_string radio_details "$radio_details"
+			json_add_string survey "$survey"
+			json_add_string survey_ack "$survey_ack"
+			json_add_string backhaul "$backhaul"
+			json_add_string backhaul_radio "$backhaul_radio"
+			json_add_string width "$width"
+			json_add_string widths "$widths"
+			json_add_string power "$power"
+			json_add_string powers "$powers"
+			json_add_boolean radio_bundle "${radio_bundle:-0}"
+			if [ -s "$dir/channel-request" ]; then
+				read -r request device target option <"$dir/channel-request"
+				case "$option" in
+					bundle) json_add_string radio_pending '无线设置';;
+					htmode) json_add_string radio_pending '通道宽度';;
+					*) json_add_string radio_pending '信道';;
+				esac
+				json_add_string channel_result '等待 AP 应用'
+			elif [ -s "$dir/channel-result" ]; then
+				result=$(cat "$dir/channel-result")
+				case "$result" in
+					'信道已写入') ;;
+					*已应用)
+						modified=$(stat -c %Y "$dir/channel-result")
+						[ "$((now - modified))" -ge 15 ] || json_add_string channel_result "$result"
+						;;
+					*) json_add_string channel_result "$result";;
+				esac
+			fi
+			add_client_count "$clients"
+			json_add_string error "$error"
+			json_add_int seen "${seen:-0}"
+			online=0
+			if [ "${seen:-0}" -gt 0 ] && [ "$seen" -le "$now" ] && [ "$((now - seen))" -le 60 ]; then
+				online=1
+			fi
+			json_add_boolean online "$online"
+			json_close_object
+		done
+		json_close_array
+		json_dump
+		;;
+    detect)
+        json_load "$(cat)" || exit 1
+        json_get_var targets ids
+        [ -n "$targets" ] && [ "${#targets}" -le 4096 ] || { reply 0 '请先选择设备'; exit; }
+        for id in $targets; do
+            valid_id "$id" && [ -s "$state/nodes/$id/token" ] || { reply 0 '所选节点无效'; exit; }
+        done
+        now=$(date +%s)
+        request=$(hexdump -n 12 -e '12/1 "%02x"' /dev/urandom)
+        [ "${#request}" = 24 ] || exit 1
+        ids= count=0
+        for dir in "$state"/nodes/*; do
+            case " $targets " in *" ${dir##*/} "*) ;; *) continue;; esac
+            seen=0 radio_bundle=0
+            [ -s "$dir/token" ] && [ -s "$dir/status" ] || continue
+            json_load_file "$dir/status" || continue
+            json_get_vars seen radio_bundle
+            [ "$radio_bundle" = 1 ] && [ "$((now - seen))" -ge 0 ] && [ "$((now - seen))" -le 60 ] || continue
+            if [ -s "$dir/survey-request" ]; then
+                read -r previous started <"$dir/survey-request"
+                [ "$((now - started))" -ge 120 ] || continue
+            fi
+            printf '%s %s\n' "$request" "$now" >"$dir/survey-request.new" &&
+                mv "$dir/survey-request.new" "$dir/survey-request" || exit 1
+            ids="${ids}${ids:+ }${dir##*/}"; count=$((count + 1))
+        done
+        json_init
+        json_add_boolean ok 1
+        json_add_string request "$request"
+        json_add_string ids "$ids"
+        json_add_int started "$now"
+        json_add_int count "$count"
+        json_add_string message "已向 $count 个节点请求重新检测，无线参数不会修改"
+        json_dump
+        ;;
+	save)
+		json_load "$(cat)" || exit 1
+		json_get_vars ssid key roaming
+        if [ -z "$key" ] && [ -s "$state/profile" ]; then
+            saved_ssid=$ssid; saved_roaming=$roaming
+            json_load_file "$state/profile"; json_get_var key key
+            ssid=$saved_ssid; roaming=$saved_roaming
+        fi
+		# WPA2-Personal uses an 8–63 character printable ASCII passphrase.
+		export LC_ALL=C
+		case "$key" in *[!\ -~]*) reply 0 '密码须为可打印 ASCII 字符'; exit;; esac
+		if [ "${#ssid}" -lt 1 ] || [ "${#ssid}" -gt 32 ] ||
+		   [ "${#key}" -lt 8 ] || [ "${#key}" -gt 63 ] ||
+		   { [ "$roaming" != 1 ] && [ "$roaming" != 0 ]; }; then
+			reply 0 'SSID 须为 1–32 字节，WPA2 密码须为 8–63 字符'
+			exit
+		fi
+		domain=$(cat "$state/domain" 2>/dev/null | tr 'A-F' 'a-f')
+		# Share the same two on-air bytes across MediaTek and hostapd drivers.
+		byte='3[0-9]|4[1-9a-f]|5[0-9a]|6[1-9a-f]|7[0-9a]'
+		if ! printf '%s\n' "$domain" | grep -qxE "($byte)($byte)"; then
+			case "$domain" in
+				[0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+					# Preserve what older MediaTek agents broadcast for legacy domains.
+					ascii=$(printf '%.2s' "$domain" | tr 'a-f' 'A-F')
+					;;
+				*) ascii=$(hexdump -n 1 -e '1/1 "%02X"' /dev/urandom) ;;
+			esac
+			domain=$(printf '%s' "$ascii" | hexdump -v -e '1/1 "%02x"')
+			[ "${#domain}" = 4 ] || exit 1
+			printf '%s\n' "$domain" >"$state/domain.new" &&
+				mv "$state/domain.new" "$state/domain" || exit 1
+		fi
+		revision=$(hexdump -n 12 -e '12/1 "%02x"' /dev/urandom)
+		json_init
+		json_add_string ssid "$ssid"
+		json_add_string key "$key"
+		json_add_string domain "$domain"
+		json_add_string revision "$revision"
+		json_add_boolean roaming "$roaming"
+		json_dump >"$state/profile.new" && mv "$state/profile.new" "$state/profile" || exit 1
+		reply 1 '配置已保存，无线节点将在下次轮询时应用'
+		;;
+	set_channel|set_channels|set_width|set_radios|set_radio)
+		json_load "$(cat)" || exit 1
+		json_get_vars id device channel width power channels changes
+		valid_id "$id" || { reply 0 '节点 ID 无效'; exit; }
+		dir="$state/nodes/$id"
+		[ -s "$dir/token" ] && [ -s "$dir/status" ] && [ -s "$state/profile" ] ||
+			{ reply 0 '节点或无线配置不可用'; exit; }
+		[ ! -s "$dir/channel-request" ] || { reply 0 '该节点已有待应用的信道设置'; exit; }
+		if [ "$2" != set_channels ] && [ "$2" != set_radios ]; then
+			case "$device" in ''|*[!A-Za-z0-9_]*) reply 0 '无线电无效'; exit;; esac
+		fi
+		case "$2" in
+            set_radios)
+                case "$changes" in ''|*[!A-Za-z0-9_:,-]*) reply 0 '无线参数无效'; exit;; esac
+                [ "${#changes}" -le 512 ] || { reply 0 '无线参数过长'; exit; }
+                ;;
+			set_channels)
+				case "$channels" in ''|*[!A-Za-z0-9_:,]*) reply 0 '信道设置无效'; exit;; esac
+				[ "${#channels}" -le 256 ] || { reply 0 '信道设置过长'; exit; }
+				;;
+			set_radio)
+				channel=${channel:--}; width=${width:--}; power=${power:--}
+				for value in "$channel" "$width" "$power"; do
+					case "$value" in -) ;; *[!0-9]*) reply 0 '无线设置无效'; exit;; esac
+				done
+				;;
+			*) case "$channel" in ''|*[!0-9]*) reply 0 '信道无效'; exit;; esac;;
+		esac
+		json_load_file "$dir/status" || exit 1
+		json_get_vars radios widths powers radio_bundle radio_details seen backhaul_radio
+		case "$2" in
+			set_width) radios=$widths; option=htmode; label=通道宽度;;
+			*) option=channel; label=信道;;
+		esac
+		if [ -n "$backhaul_radio" ]; then
+            case "$2" in
+                set_radios) case ",$changes," in *",$backhaul_radio:"*) reply 0 '回传频段已锁定'; exit;; esac;;
+                set_channels) case ",$channels," in *",$backhaul_radio:"*) reply 0 '回传频段已锁定'; exit;; esac;;
+                *) [ "$device" != "$backhaul_radio" ] || { reply 0 '回传频段已锁定'; exit; };;
+            esac
+        fi
+		now=$(date +%s)
+		[ "$seen" -le "$now" ] && [ "$((now - seen))" -le 60 ] ||
+			{ reply 0 '节点已离线'; exit; }
+        if [ "$2" = set_radios ]; then
+            powers=$(printf '%s' "$powers" | sed -e 's/:%:/:/g' -e 's/:dBm:/:/g')
+            if [ "$radio_bundle" != 1 ] || ! valid_radio_changes "$radios" "$widths" "$powers" "$changes"; then
+                reply 0 '该节点不支持所选无线参数'; exit
+            fi
+            request=$(hexdump -n 12 -e '12/1 "%02x"' /dev/urandom)
+            [ "${#request}" = 24 ] &&
+                printf '%s batch %s radios\n' "$request" "$changes" >"$dir/channel-request.new" &&
+                mv "$dir/channel-request.new" "$dir/channel-request" || exit 1
+            reply 1 '已提交无线参数，等待 AP 应用'
+            exit
+        fi
+		if [ "$2" = set_channels ]; then
+			changes=$(printf '%s' "$channels" | tr ',' ' ')
+			if [ -z "$radio_details" ] || ! valid_channel_changes "$radios" "$changes"; then
+				reply 0 '该节点不支持所选信道设置'
+				exit
+			fi
+			request=$(hexdump -n 12 -e '12/1 "%02x"' /dev/urandom)
+			[ "${#request}" = 24 ] &&
+				printf '%s batch %s channels\n' "$request" "$channels" >"$dir/channel-request.new" &&
+				mv "$dir/channel-request.new" "$dir/channel-request" || exit 1
+			reply 1 '已提交信道设置，AP 将在下次上报时应用'
+			exit
+		fi
+		if [ "$2" = set_radio ]; then
+			powers=$(printf '%s' "$powers" | sed -e 's/:%:/:/g' -e 's/:dBm:/:/g')
+			if [ "$radio_bundle" != 1 ] || [ "$channel:$width:$power" = '-:-:-' ] ||
+			   { [ "$channel" != - ] && ! radio_value_allowed "$radios" "$device" "$channel"; } ||
+			   { [ "$width" != - ] && ! radio_value_allowed "$widths" "$device" "$width"; } ||
+			   { [ "$power" != - ] && ! radio_value_allowed "$powers" "$device" "$power"; }; then
+				reply 0 '该无线电不支持所选设置'
+				exit
+			fi
+			request=$(hexdump -n 12 -e '12/1 "%02x"' /dev/urandom)
+			[ "${#request}" = 24 ] &&
+				printf '%s %s %s,%s,%s bundle\n' "$request" "$device" "$channel" "$width" "$power" >"$dir/channel-request.new" &&
+				mv "$dir/channel-request.new" "$dir/channel-request" || exit 1
+			reply 1 '已提交无线设置，AP 将在下次上报时应用'
+			exit
+		fi
+		for radio in $radios; do
+			[ "${radio%%:*}" = "$device" ] || continue
+			case ",${radio#*:}," in
+				*,"$channel",*)
+					request=$(hexdump -n 12 -e '12/1 "%02x"' /dev/urandom)
+					[ "${#request}" = 24 ] &&
+						printf '%s %s %s %s\n' "$request" "$device" "$channel" "$option" >"$dir/channel-request.new" &&
+						mv "$dir/channel-request.new" "$dir/channel-request" || exit 1
+					reply 1 "已提交${label}设置，AP 将在下次上报时应用"
+					exit
+					;;
+			esac
+		done
+		reply 0 "该无线电不支持所选${label}"
+		;;
+	enroll|revoke)
+		json_load "$(cat)" || exit 1
+		json_get_var id id
+		valid_id "$id" || { reply 0 '节点 ID 仅支持 1–40 个字母、数字、下划线或连字符'; exit; }
+		dir="$state/nodes/$id"
+		if [ "$2" = revoke ]; then
+			rm -f "$dir/token" "$dir/status" "$dir/channel-request" "$dir/channel-request.new" "$dir/channel-result" "$dir/channel-result.new"
+			rmdir "$dir" 2>/dev/null
+			reply 1 '节点凭据已撤销'
+			exit
+		fi
+		if [ -d "$dir" ]; then
+			reply 0 '节点已存在，请先撤销旧凭据'
+			exit
+		fi
+		register_node || exit 1
+		json_init
+		json_add_boolean ok 1
+		json_add_string token "$token"
+		json_dump
+		;;
+esac

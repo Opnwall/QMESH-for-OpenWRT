@@ -1,0 +1,9 @@
+#!/bin/sh
+umask 077
+mkdir -p /var/run/mesh-backhaul
+case "$script_type" in
+ up) ip link set "$dev" address "$(uci -q get mesh-backhaul.main.tap_mac)" || exit 1
+     ip link set "$dev" up
+     date +%s > /var/run/mesh-backhaul/vpn-up;;
+ down) rm -f /var/run/mesh-backhaul/vpn-up;;
+esac

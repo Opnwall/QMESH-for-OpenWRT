@@ -1,0 +1,4 @@
+/etc/mesh-control/
+/etc/config/qmesh
+/etc/config/mesh-control-agent
+/etc/config/mesh-backhaul
