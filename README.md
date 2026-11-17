@@ -1,6 +1,6 @@
-# QMESH
+# QMESH for OpenWRT
 
-面向 OpenWrt、QWRT 和 iStoreOS 的 LuCI 无线集中管理插件。没有 Wi-Fi 的路由器也可以作为控制器，统一管理多台无线 AP。
+面向 OpenWrt 的 LuCI 无线集中管理插件。没有 Wi-Fi 的路由器也可以作为控制器，统一管理多台无线 AP。
 
 **当前版本：0.1.63** · [下载安装包](https://github.com/Opnwall/QMESH/releases/latest) · [构建说明](BUILD.md) · [固件升级与配置保留](UPGRADE.md)
 
@@ -17,19 +17,15 @@ QMESH 提供控制器与 Agent 的一体化 IPK、APK。控制器负责配置和
 - 设备调优支持勾选节点、主动检测、生成建议和手动应用；不会后台自动调整。
 - 概览节点状态、手机卡片布局和系统暗色适配。
 - 已配对测试设备支持有线优先、断线切无线、恢复后切回有线的双回传。
-- 0.1.63 增加角色持久化和固件升级备份清单，保留已有接入资料及双回传证书。
+- 增加角色持久化和固件升级备份清单，保留已有接入资料及双回传证书。
 
 ## 界面预览
 
-以下为功能截图，部分截图中的旧标题仍显示 MESH；0.1.63 的菜单和页面标题已统一为 QMESH。含接入码的控制器截图不公开。
+以下为功能截图。
 
 ### 常规设置
 
 ![AP 常规设置](images/控制器.png)
-
-### AP 设置
-
-![AP 常规设置](images/AP设置.png)
 
 ### 节点列表
 
@@ -39,12 +35,16 @@ QMESH 提供控制器与 Agent 的一体化 IPK、APK。控制器负责配置和
 
 ![设备调优](images/无线调优.png)
 
+### AP 设置
+
+![AP 常规设置](images/AP设置.png)
+
 ## 安装前准备
 
 1. 控制器需提供 HTTPS；AP 必须能通过管理网络访问控制器。
-2. AP 需有已启用、驱动支持的无线 AP 接口，并桥接到正确的 LAN/VLAN。
-3. 安装时保留一条可靠的有线管理路径，固件软件源需能满足依赖。
-4. 先备份配置。备份包含密码、令牌和私钥，请私下保存。
+2. AP 需有已启用、驱动支持的无线 AP 接口。
+3. AP 手动分配IP，禁用 DHCP 功能，并将无线桥接到 LAN。
+4. 安装时保留一条可靠的有线管理路径，固件软件源需能满足依赖。
 
 ```sh
 umask 077
@@ -151,7 +151,7 @@ AP 模式保留三个菜单，节点管理及调优页面提示前往上级控�
 
 ## 固件升级：保留角色和双回传资料
 
-0.1.63 将角色持久化到 `/etc/config/qmesh`，兼容 `/etc/mesh-control/role`，并添加固件升级保留路径：
+角色持久化到 `/etc/config/qmesh`，兼容 `/etc/mesh-control/role`，并添加固件升级保留路径：
 
 - `/etc/config/qmesh`
 - `/etc/config/mesh-control-agent`
@@ -166,8 +166,7 @@ sysupgrade -b /root/qmesh-before-firmware.tar.gz
 tar -tzf /root/qmesh-before-firmware.tar.gz | grep -E 'etc/config/(qmesh|mesh-control-agent|mesh-backhaul)|etc/mesh-control/'
 ```
 
-**保留配置不等于保留软件。** 新固件未内置 QMESH、OpenVPN 或依赖时，刷机后仍需重装匹配的软件包。备份包含敏感资料，不要公开。
-
+**保留配置不等于保留软件。** 新固件未内置 QMESH、OpenVPN 或依赖时，刷机后仍需重装匹配的软件包。
 完整步骤及测试边界见 [UPGRADE.md](UPGRADE.md)。本次确认了实际升级备份归档含角色和已有双回传资料，未重新刷机验证。
 
 ## 常见问题
@@ -214,4 +213,4 @@ sh scripts/build-release.sh
 
 需要 Python 3；生成 IPK 和 APK 构建输入。构建 APK 还需要 Linux 上支持 `mkpkg` 的 APK v3 工具；缺少工具时脚本会明确提示 APK 未构建。详情见 [BUILD.md](BUILD.md)。
 
-提交问题时请提供固件版本、设备型号、驱动类型、插件版本及脱敏日志。不要提交密码、令牌、接入码、证书私钥或完整配置备份。
+提交问题时请提供固件版本、设备型号、驱动类型、插件版本及脱敏日志。
