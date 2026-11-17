@@ -2,8 +2,7 @@
 
 面向 OpenWrt 的 LuCI 无线集中管理插件。没有 Wi-Fi 的路由器也可以作为控制器，统一管理多台无线 AP。
 
-**当前版本：0.1.63** · [下载安装包](https://github.com/Opnwall/QMESH/releases/latest) · [构建说明](BUILD.md) · [固件升级与配置保留](UPGRADE.md)
-
+**当前版本：0.1.63** · [下载安装包](https://github.com/Opnwall/QMESH/releases/latest) · [构建说明](BUILD.md) 
 QMESH 提供控制器与 Agent 的一体化 IPK、APK。控制器负责配置和状态管理，AP 通过 HTTPS 主动连接控制器，约每 20 秒上报一次。它不替代本机的网络、DHCP、VLAN 或桥接配置，也不代表所有设备都支持原生 802.11s / EasyMesh。
 
 ## 主要功能
@@ -167,7 +166,6 @@ tar -tzf /root/qmesh-before-firmware.tar.gz | grep -E 'etc/config/(qmesh|mesh-co
 ```
 
 **保留配置不等于保留软件。** 新固件未内置 QMESH、OpenVPN 或依赖时，刷机后仍需重装匹配的软件包。
-完整步骤及测试边界见 [UPGRADE.md](UPGRADE.md)。本次确认了实际升级备份归档含角色和已有双回传资料，未重新刷机验证。
 
 ## 常见问题
 
