@@ -1,6 +1,6 @@
 # QMESH for OpenWRT
 
-面向 OpenWrt 的 LuCI 无线集中管理插件。没有 Wi-Fi 的路由器也可以作为控制器，统一管理多台无线 AP。
+面向 OpenWrt 的 LuCI 无线集中管理插件。无 Wi-Fi 的路由器可以作为控制器，统一管理多台无线 AP。
 
 QMESH 提供控制器与 Agent 的一体化 IPK、APK。控制器负责配置和状态管理，AP 通过 HTTPS 主动连接控制器，约每 20 秒上报一次。它不替代本机的网络、DHCP、VLAN 或桥接配置，也不代表所有设备都支持原生 802.11s / EasyMesh。
 
